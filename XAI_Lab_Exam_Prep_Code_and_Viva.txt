@@ -1,0 +1,1105 @@
+EXPLAINABLE AI — LAB EXAM PREP
+CODE COMPENDIUM + TOPIC-WISE VIVA GUIDE
+
+PART I — COMPLETE CODE (SOURCE CODE PRESERVED)
+The ten code blocks below are copied from the uploaded document without intentional code edits.
+Helper functions are included in their original positions within each experiment.
+
+========================================================================================
+Experiment 1 — Permutation Feature Importance (PFI)
+========================================================================================
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import accuracy_score
+from sklearn.inspection import permutation_importance
+ 
+# ---------- data + model (given) ----------
+df = pd.read_csv("diabetes.csv")
+X = df.drop("Outcome", axis=1)
+y = df["Outcome"]
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y)
+ 
+model = DecisionTreeClassifier(criterion="entropy", max_depth=5, random_state=42)
+model.fit(X_train, y_train)
+ 
+# ---------- library PFI (given) ----------
+result = permutation_importance(model, X_test, y_test, scoring="accuracy",
+                                n_repeats=10, random_state=42)
+ 
+# ---------- manual PFI  (YOU WRITE THIS) ----------
+def manual_pfi(model, X, y, n_repeats=1):
+    baseline = accuracy_score(y, model.predict(X))      # 1. score BEFORE shuffling
+    importance = []
+    for feature in X.columns:                            # 2. one feature at a time
+        drops = []
+        for _ in range(n_repeats):
+            X_perm = X.copy()                            # 3. copy, keep original safe
+            X_perm[feature] = np.random.permutation(X_perm[feature].values)  # 4. shuffle ONE column
+            score = accuracy_score(y, model.predict(X_perm))   # 5. score AFTER shuffling
+            drops.append(baseline - score)               # 6. importance = how much accuracy fell
+        importance.append(np.mean(drops))
+    return importance
+ 
+manual = manual_pfi(model, X_test, y_test)
+ 
+# ---------- compare + plot (given) ----------
+comparison = pd.DataFrame({"Feature": X.columns,
+                           "Library_PFI": result.importances_mean,
+                           "Manual_PFI": manual}).sort_values("Library_PFI", ascending=False)
+print(comparison)
+comparison.plot(x="Feature", y=["Library_PFI", "Manual_PFI"], kind="bar")
+plt.ylabel("Permutation Importance")
+plt.show()
+
+========================================================================================
+Experiment 2 — SHAP (Shapley Additive Explanations)
+========================================================================================
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import shap
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+ 
+# ---------- data + model (given) ----------
+data = load_breast_cancer()
+X = pd.DataFrame(data.data, columns=data.feature_names)
+y = pd.Series(data.target)          # 0 = malignant, 1 = benign
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42)
+ 
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
+ 
+# ---------- SHAP values (given) ----------
+explainer = shap.TreeExplainer(model)
+raw_shap = explainer.shap_values(X_test)
+ 
+# ---------- helpers  (YOU WRITE THESE) ----------
+def get_class_shap(raw_shap, class_id=1):
+    """Different SHAP versions return different shapes. Make it (samples x features)."""
+    if isinstance(raw_shap, list):               # old SHAP: [class0_array, class1_array]
+        return np.asarray(raw_shap[class_id])
+    raw_shap = np.asarray(raw_shap)
+    if raw_shap.ndim == 3:                       # new SHAP: (samples, features, classes)
+        return raw_shap[:, :, class_id]
+    return raw_shap                              # already 2-D
+ 
+def shap_importance(shap_vals, feature_names):
+    mean_abs = np.abs(shap_vals).mean(axis=0)    # average |SHAP| over all samples
+    table = pd.DataFrame({"Feature": feature_names, "Mean |SHAP|": mean_abs})
+    return table.sort_values("Mean |SHAP|", ascending=False)
+ 
+shap_vals = get_class_shap(raw_shap, class_id=1)
+base_value = np.ravel(explainer.expected_value)[1]    # average prediction for class 1
+ 
+# ---------- global plots (given) ----------
+shap.summary_plot(shap_vals, X_test)                      # beeswarm
+shap.summary_plot(shap_vals, X_test, plot_type="bar")     # bar
+print(shap_importance(shap_vals, X_test.columns).head(10))
+ 
+# ---------- local plots for ONE sample (given) ----------
+sample = 10
+exp = shap.Explanation(values=shap_vals[sample], base_values=base_value,
+                       data=X_test.iloc[sample].values,
+                       feature_names=X_test.columns.tolist())
+shap.plots.waterfall(exp, max_display=10)
+ 
+shap.force_plot(base_value, shap_vals[sample], X_test.iloc[sample], matplotlib=True)
+ 
+# ---------- additivity check: base + sum(SHAP) = model output ----------
+print(base_value + shap_vals[sample].sum())
+print(model.predict_proba(X_test.iloc[[sample]])[0, 1])
+
+========================================================================================
+Experiment 3 — Partial Dependence Plot (PDP) and Sensitivity
+========================================================================================
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+ 
+# ---------- data + model (given) ----------
+data = pd.read_csv("House_price.csv").drop("Address", axis=1)
+X = data.drop("Price", axis=1)
+y = data["Price"]
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42)
+ 
+model = RandomForestRegressor(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
+ 
+# ---------- helpers  (YOU WRITE THESE) ----------
+def partial_dependence_manual(model, X, feature, n_points=50):
+    grid = np.linspace(X[feature].min(), X[feature].max(), n_points)   # 1. values to try
+    pd_values = []
+    for value in grid:
+        X_temp = X.copy()                       # 2. fresh copy of the data
+        X_temp[feature] = value                 # 3. force EVERY row to this value
+        preds = model.predict(X_temp)           # 4. predict for all rows
+        pd_values.append(preds.mean())          # 5. average prediction = PDP point
+    return grid, np.array(pd_values)
+ 
+def sensitivity(model, X, feature, delta):
+    original = model.predict(X).mean()          # average prediction now
+    X_new = X.copy()
+    X_new[feature] = X_new[feature] + delta     # nudge the feature by delta
+    new = model.predict(X_new).mean()           # average prediction after the nudge
+    change = new - original
+    return original, new, change, change / delta     # last one = sensitivity (change per unit)
+ 
+# ---------- PDP for 4 features (given) ----------
+features = ["Avg. Area Income", "House Age", "Number of Rooms", "Area Population"]
+plt.figure(figsize=(12, 8))
+for i, feature in enumerate(features):
+    grid, pdp = partial_dependence_manual(model, X_train, feature)
+    plt.subplot(2, 2, i + 1)
+    plt.plot(grid, pdp)
+    plt.xlabel(feature)
+    plt.ylabel("Average Predicted Price")
+    plt.title("PDP - " + feature)
+    plt.grid(True)
+plt.tight_layout()
+plt.show()
+ 
+# ---------- sensitivity (given) ----------
+changes = {"Avg. Area Income": 5000, "House Age": 1,
+           "Number of Rooms": 1, "Area Population": 5000}
+for feature, delta in changes.items():
+    original, new, change, sens = sensitivity(model, X_test, feature, delta)
+    print(feature, "| change in price:", round(change, 2), "| sensitivity:", round(sens, 4))
+
+========================================================================================
+Experiment 4 — ICE and ALE plots
+========================================================================================
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+ 
+# ---------- data + model (given) ----------
+data = pd.read_csv("House_price.csv").drop("Address", axis=1)
+X = data.drop("Price", axis=1)
+y = data["Price"]
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42)
+ 
+model = RandomForestRegressor(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
+ 
+feature = "Avg. Area Income"
+ 
+# ---------- helpers  (YOU WRITE THESE) ----------
+def ice_curves(model, X, feature, grid):
+    """One row per sample, one column per grid value."""
+    curves = []
+    for value in grid:
+        X_temp = X.copy()
+        X_temp[feature] = value                  # set the feature to the grid value for ALL samples
+        curves.append(model.predict(X_temp))     # one prediction per sample
+    return np.array(curves).T                    # shape: (n_samples, n_grid)
+ 
+def ale_1d(model, X, feature, n_bins=10):
+    bins = np.linspace(X[feature].min(), X[feature].max(), n_bins + 1)   # 1. cut range into bins
+    effects, centers = [], []
+    for i in range(n_bins):
+        lower, upper = bins[i], bins[i + 1]
+        if i == n_bins - 1:                                   # last bin includes the right edge
+            mask = (X[feature] >= lower) & (X[feature] <= upper)
+        else:
+            mask = (X[feature] >= lower) & (X[feature] < upper)
+        X_bin = X[mask]                                       # 2. ONLY the real rows inside this bin
+        if len(X_bin) == 0:
+            continue
+        X_low, X_up = X_bin.copy(), X_bin.copy()
+        X_low[feature] = lower                                # 3. same rows, feature at lower edge
+        X_up[feature] = upper                                 #    same rows, feature at upper edge
+        diff = model.predict(X_up) - model.predict(X_low)     # 4. local change in prediction
+        effects.append(diff.mean())                           # 5. average local effect of this bin
+        centers.append((lower + upper) / 2)
+    ale = np.cumsum(effects)                                  # 6. accumulate the local effects
+    ale = ale - ale.mean()                                    # 7. centre around zero
+    return np.array(centers), ale
+ 
+# ---------- ICE (given) ----------
+grid = np.linspace(X_train[feature].min(), X_train[feature].max(), 50)
+ice = ice_curves(model, X_test.iloc[:100], feature, grid)
+plt.figure(figsize=(10, 6))
+for row in ice:
+    plt.plot(grid, row, alpha=0.4)
+plt.plot(grid, ice.mean(axis=0), "k--", linewidth=3, label="average = PDP")
+plt.xlabel(feature); plt.ylabel("Predicted House Price"); plt.title("ICE plot")
+plt.legend(); plt.show()
+ 
+# ---------- ALE (given) ----------
+centers, ale = ale_1d(model, X_test, feature, n_bins=10)
+plt.figure(figsize=(10, 6))
+plt.plot(centers, ale, marker="o")
+plt.axhline(0, linestyle="--")
+plt.xlabel(feature); plt.ylabel("Centered ALE"); plt.title("ALE plot")
+plt.grid(True); plt.show()
+
+========================================================================================
+Experiment 5 — Integrated Gradients (IG)
+========================================================================================
+import torch
+import torch.nn.functional as F
+import numpy as np
+from torchvision import models, transforms
+from PIL import Image, ImageFilter
+from captum.attr import IntegratedGradients
+ 
+# ---------- model + image (given) ----------
+MEAN = [0.485, 0.456, 0.406]
+STD = [0.229, 0.224, 0.225]
+ 
+model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT).eval()
+preprocess = transforms.Compose([
+    transforms.Resize(256), transforms.CenterCrop(224),
+    transforms.ToTensor(), transforms.Normalize(MEAN, STD)])
+ 
+raw_img = Image.open("dog.jpg").convert("RGB")
+x = preprocess(raw_img).unsqueeze(0)                  # shape [1, 3, 224, 224]
+ 
+probs = F.softmax(model(x), dim=1)
+target = probs.argmax(dim=1).item()                   # class we want to explain
+ 
+# ---------- helpers  (YOU WRITE THESE) ----------
+def get_baseline(kind, raw_img, x):
+    m = torch.tensor(MEAN).view(1, 3, 1, 1)
+    s = torch.tensor(STD).view(1, 3, 1, 1)
+    if kind == "black":                               # pixel value 0, written in normalised units
+        return (torch.zeros_like(x) - m) / s
+    if kind == "white":                               # pixel value 1
+        return (torch.ones_like(x) - m) / s
+    if kind == "blur":                                # blurred copy of the same image
+        return preprocess(raw_img.filter(ImageFilter.GaussianBlur(15))).unsqueeze(0)
+ 
+def integrated_gradients(model, x, baseline, target, steps=50):
+    total_grad = torch.zeros_like(x)
+    for k in range(1, steps + 1):
+        point = baseline + (k / steps) * (x - baseline)     # a point on the straight path
+        point = point.clone().requires_grad_(True)
+        score = model(point)[0, target]                     # class score (logit, before softmax)
+        grad = torch.autograd.grad(score, point)[0]         # d score / d pixels
+        total_grad += grad
+    avg_grad = total_grad / steps                           # Riemann-sum average of the gradients
+    return (x - baseline) * avg_grad                        # scale by how far the input moved
+ 
+def hide_top_pixels(x, attr, k_percent):
+    importance = attr.abs().sum(dim=1)                      # one number per pixel: [1, H, W]
+    threshold = torch.quantile(importance.flatten(), 1 - k_percent / 100)
+    mask = (importance >= threshold).float().unsqueeze(1)   # 1 = top-k% pixels, shape [1,1,H,W]
+    return x * (1 - mask)                                   # set those pixels to 0
+ 
+# ---------- run IG (given) ----------
+baseline = get_baseline("black", raw_img, x)
+ 
+attr_manual = integrated_gradients(model, x, baseline, target, steps=50)
+ 
+ig = IntegratedGradients(model)                             # library version (same maths)
+attr, delta = ig.attribute(x, baselines=baseline, target=target,
+                           n_steps=50, return_convergence_delta=True)
+ 
+# completeness check: sum of attributions = F(x) - F(baseline)
+with torch.no_grad():
+    diff = model(x)[0, target] - model(baseline)[0, target]
+print(attr_manual.sum().item(), diff.item(), "delta:", delta.item())
+ 
+# ---------- deletion test (given) ----------
+x_hidden = hide_top_pixels(x, attr, k_percent=15)
+with torch.no_grad():
+    new_conf = F.softmax(model(x_hidden), dim=1)[0, target].item()
+print("confidence:", probs[0, target].item(), "->", new_conf)
+
+========================================================================================
+Experiment 6 — XRAI and the gray-patch (occlusion) test
+========================================================================================
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import saliency.core as saliency
+from PIL import Image
+from tensorflow.keras.applications import InceptionV3
+from tensorflow.keras.applications.inception_v3 import preprocess_input
+from tensorflow.keras.applications.imagenet_utils import decode_predictions
+ 
+# ---------- model + image (given) ----------
+model = InceptionV3(weights="imagenet", include_top=True)
+ 
+image = np.array(Image.open("cat.jpg").convert("RGB").resize((299, 299))).astype(np.float32)
+input_image = preprocess_input(image.copy())
+ 
+pred = model.predict(np.expand_dims(input_image, 0), verbose=0)[0]
+target_class = int(np.argmax(pred))
+original_conf = float(pred[target_class])
+print(decode_predictions(np.expand_dims(pred, 0), top=3)[0])
+ 
+# ---------- helper 1 for XRAI  (YOU WRITE THIS) ----------
+def call_model_function(images, call_model_args=None, expected_keys=None):
+    images = tf.convert_to_tensor(images, dtype=tf.float32)
+    target = call_model_args["target_class"]
+    with tf.GradientTape() as tape:
+        tape.watch(images)                                  # track gradients w.r.t. the pixels
+        output = model(images, training=False)[:, target]   # score of the target class
+    gradients = tape.gradient(output, images).numpy()       # d score / d pixels
+    return {saliency.INPUT_OUTPUT_GRADIENTS: gradients}     # XRAI expects exactly this key
+ 
+# ---------- run XRAI (given) ----------
+xrai = saliency.XRAI()
+mask = xrai.GetMask(input_image, call_model_function,
+                    call_model_args={"target_class": target_class})
+mask = np.array(mask)
+if mask.ndim == 3:
+    mask = mask.mean(axis=-1)
+mask = (mask - mask.min()) / (mask.max() - mask.min())      # scale to 0..1
+top20 = mask >= np.percentile(mask, 80)                     # the most important 20 %
+ 
+plt.subplot(1, 2, 1); plt.imshow(image.astype(np.uint8)); plt.title("Original")
+plt.subplot(1, 2, 2); plt.imshow(image.astype(np.uint8)); plt.imshow(mask, cmap="jet", alpha=0.45)
+plt.title("XRAI overlay"); plt.show()
+ 
+# ---------- helper 2 and 3: gray-patch test  (YOU WRITE THESE) ----------
+def create_patched_image(image, x, y, size):
+    patched = image.copy()
+    half = size // 2
+    x1, x2 = max(0, x - half), min(299, x + half)           # keep the box inside the image
+    y1, y2 = max(0, y - half), min(299, y + half)
+    patched[y1:y2, x1:x2] = 128                             # paint a gray square
+    return patched
+ 
+def find_worst_patch(image, sizes=(30, 50, 70, 90), step=30):
+    candidates, batch = [], []
+    for size in sizes:
+        for y in range(30, 270, step):
+            for x in range(30, 270, step):
+                candidates.append((x, y, size))
+                batch.append(preprocess_input(create_patched_image(image, x, y, size).copy()))
+    preds = model.predict(np.array(batch), verbose=0)[:, target_class]   # confidence for every patch
+    drops = original_conf - preds                           # how much confidence was lost
+    best = int(np.argmax(drops))                            # patch that hurts the most
+    return candidates[best], drops[best]
+ 
+(bx, by, bsize), best_drop = find_worst_patch(image)
+print("worst patch at", (bx, by), "size", bsize, "| confidence drop:", best_drop)
+plt.imshow(create_patched_image(image, bx, by, bsize).astype(np.uint8)); plt.show()
+
+========================================================================================
+Experiment 7 — Grad-CAM from scratch
+========================================================================================
+import torch
+import torch.nn.functional as F
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
+from torchvision import models
+from PIL import Image
+ 
+# ---------- model (given) ----------
+weights = models.ResNet50_Weights.DEFAULT
+model = models.resnet50(weights=weights).eval()
+preprocess = weights.transforms()
+categories = weights.meta["categories"]
+ 
+# ---------- hooks: grab activations + gradients of the last conv block (given) ----------
+activations = None
+gradients = None
+ 
+def forward_hook(module, inp, out):
+    global activations
+    activations = out                     # A^k : feature maps  [1, 2048, h, w]
+ 
+def backward_hook(module, grad_in, grad_out):
+    global gradients
+    gradients = grad_out[0]               # d score / d A^k     [1, 2048, h, w]
+ 
+target_layer = model.layer4
+target_layer.register_forward_hook(forward_hook)
+target_layer.register_full_backward_hook(backward_hook)
+ 
+# ---------- helper  (YOU WRITE THIS) ----------
+def compute_gradcam(activations, gradients):
+    alpha = gradients.mean(dim=(2, 3), keepdim=True)          # 1. average gradient per channel -> weights
+    cam = (alpha * activations).sum(dim=1, keepdim=True)      # 2. weighted sum of the feature maps
+    cam = F.relu(cam)                                         # 3. keep only positive evidence
+    cam = cam.squeeze().detach().cpu().numpy()                # 4. to a 2-D numpy array
+    cam = cam - cam.min()                                     # 5. scale to 0..1
+    if cam.max() != 0:
+        cam = cam / cam.max()
+    return cam
+ 
+# ---------- full pipeline (given) ----------
+def grad_cam(image_path):
+    image = Image.open(image_path).convert("RGB")
+    original = np.array(image)
+    x = preprocess(image).unsqueeze(0)
+ 
+    model.zero_grad()
+    output = model(x)                                         # forward pass (hook saves activations)
+    pred = output.argmax(dim=1).item()
+    output[0, pred].backward()                                # backward pass (hook saves gradients)
+ 
+    cam = compute_gradcam(activations, gradients)
+    cam = cv2.resize(cam, (original.shape[1], original.shape[0]))     # up-size to the image
+ 
+    heat = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
+    heat = cv2.cvtColor(heat, cv2.COLOR_BGR2RGB)
+    overlay = cv2.addWeighted(original, 0.55, heat, 0.45, 0)
+    return original, heat, overlay, categories[pred]
+ 
+original, heat, overlay, label = grad_cam("part1.jpg")
+plt.subplot(1, 3, 1); plt.imshow(original); plt.title("Original")
+plt.subplot(1, 3, 2); plt.imshow(heat); plt.title("Grad-CAM")
+plt.subplot(1, 3, 3); plt.imshow(overlay); plt.title(label)
+plt.show()
+
+========================================================================================
+Experiment 8 — LIME for images
+========================================================================================
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+from PIL import Image
+from skimage import data, segmentation
+from lime import lime_image
+from torchvision.models import resnet50, ResNet50_Weights
+ 
+# ---------- model + image (given) ----------
+weights = ResNet50_Weights.DEFAULT
+model = resnet50(weights=weights).eval()
+preprocess = weights.transforms()
+categories = weights.meta["categories"]
+ 
+img = data.astronaut()                                   # uint8 array (H, W, 3)
+ 
+# ---------- helpers  (YOU WRITE THESE) ----------
+@torch.no_grad()
+def classifier_fn(batch):
+    """LIME gives a batch of images (numpy). Return class probabilities, shape (n, 1000)."""
+    tensors = []
+    for im in batch:
+        im = np.clip(im, 0, 255).astype(np.uint8)
+        tensors.append(preprocess(Image.fromarray(im)))   # same preprocessing as normal
+    x = torch.stack(tensors)
+    return torch.softmax(model(x), dim=1).numpy()
+ 
+def slic_segments(im):
+    return segmentation.slic(im, n_segments=60, compactness=10, start_label=0, channel_axis=-1)
+ 
+def quickshift_segments(im):
+    return segmentation.quickshift(im, kernel_size=3, max_dist=6, ratio=0.5, channel_axis=-1)
+ 
+def make_explanation(im, segmentation_fn, num_samples=800, seed=42):
+    explainer = lime_image.LimeImageExplainer(random_state=seed)
+    return explainer.explain_instance(
+        im, classifier_fn, top_labels=3, hide_color=0,
+        num_samples=num_samples, segmentation_fn=segmentation_fn, random_seed=seed)
+ 
+def get_positive_weights(explanation, class_id):
+    pairs = explanation.local_exp[class_id]                  # [(segment_id, weight), ...]
+    positive = [(int(s), float(w)) for s, w in pairs if w > 0]
+    return sorted(positive, key=lambda p: p[1], reverse=True)   # strongest first
+ 
+def deletion_test(im, explanation, class_id, base_prob, k_list=(1, 3, 5, 10), n_random=20):
+    segments = explanation.segments
+    weights = get_positive_weights(explanation, class_id)
+    all_ids = np.unique(segments)
+    rng = np.random.default_rng(42)
+    results = []
+    for k in k_list:
+        if len(weights) < k:
+            continue
+        top_ids = [s for s, w in weights[:k]]                # LIME's k best regions
+        deleted = im.copy()
+        deleted[np.isin(segments, top_ids)] = 0              # blacken them
+        lime_drop = base_prob - classifier_fn([deleted])[0, class_id]
+ 
+        random_drops = []
+        for _ in range(n_random):                            # same number of RANDOM regions
+            ids = rng.choice(all_ids, size=k, replace=False)
+            d = im.copy()
+            d[np.isin(segments, ids)] = 0
+            random_drops.append(base_prob - classifier_fn([d])[0, class_id])
+        results.append((k, lime_drop, np.mean(random_drops)))
+    return results
+ 
+# ---------- run (given) ----------
+probs = classifier_fn([img])[0]
+target = int(np.argmax(probs))
+print("Prediction:", categories[target], probs[target])
+ 
+exp_A = make_explanation(img, slic_segments)
+exp_B = make_explanation(img, quickshift_segments)
+ 
+out_A, _ = exp_A.get_image_and_mask(target, positive_only=True, num_features=10, hide_rest=False)
+out_B, _ = exp_B.get_image_and_mask(target, positive_only=True, num_features=10, hide_rest=False)
+plt.subplot(1, 2, 1); plt.imshow(out_A); plt.title("SLIC")
+plt.subplot(1, 2, 2); plt.imshow(out_B); plt.title("Quickshift"); plt.show()
+ 
+for name, exp in [("SLIC", exp_A), ("Quickshift", exp_B)]:
+    print(name)
+    for k, lime_drop, rand_drop in deletion_test(img, exp, target, probs[target]):
+        print(f"  k={k:2d}  LIME drop={lime_drop:.4f}  random drop={rand_drop:.4f}")
+
+========================================================================================
+Experiment 9 — LIME for text
+========================================================================================
+import re
+import numpy as np
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from lime.lime_text import LimeTextExplainer
+ 
+# ---------- model (given) ----------
+MODEL_NAME = "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME).eval()
+ 
+print(model.config.id2label)                  # {0: 'NEGATIVE', 1: 'POSITIVE'}
+NEG, POS = 0, 1
+ 
+# ---------- helpers  (YOU WRITE THESE) ----------
+def predict_proba(sentences):
+    """LIME passes a LIST of strings. Return array (n_sentences, 2) of probabilities."""
+    if isinstance(sentences, str):
+        sentences = [sentences]
+    enc = tokenizer(sentences, padding=True, truncation=True, return_tensors="pt")
+    with torch.no_grad():
+        logits = model(**enc).logits
+    return torch.softmax(logits, dim=1).numpy()
+ 
+def get_words(sentence):
+    return re.findall(r"\b[\w'-]+\b", sentence)            # words without punctuation
+ 
+def remove_one_word(sentence):
+    words = get_words(sentence)
+    original = predict_proba([sentence])[0][POS]            # positive probability now
+    rows = []
+    for i, w in enumerate(words):
+        shorter = " ".join(words[:i] + words[i + 1:])       # sentence WITHOUT word i
+        p = predict_proba([shorter])[0][POS]
+        rows.append((w, p, original - p))                   # drop > 0  => word was pushing POSITIVE
+    return sorted(rows, key=lambda r: r[2], reverse=True)
+ 
+def find_removed_words(original, changed):
+    orig_words, changed_words = get_words(original), get_words(changed)
+    removed, j = [], 0
+    for w in orig_words:
+        if j < len(changed_words) and w.lower() == changed_words[j].lower():
+            j += 1                                          # word is still there
+        else:
+            removed.append(w)                               # word disappeared
+    return removed
+ 
+# ---------- run LIME (given) ----------
+sentence = "The plot was weak, but the acting was wonderful."
+print(predict_proba([sentence]))
+ 
+generated = []                                              # remember every sentence LIME tries
+def lime_fn(sentences):
+    generated.extend(sentences)
+    return predict_proba(sentences)
+ 
+explainer = LimeTextExplainer(class_names=["NEGATIVE", "POSITIVE"], random_state=42)
+exp = explainer.explain_instance(sentence, lime_fn,
+                                 num_features=len(sentence.split()), num_samples=1000)
+scores = exp.as_list()                                      # [(word, score), ...]
+print(scores)
+print("largest +:", max(scores, key=lambda s: s[1]), " largest -:", min(scores, key=lambda s: s[1]))
+ 
+# ---------- the 3 lowest copies and what they removed (given) ----------
+unique = [s for s in dict.fromkeys(generated) if s != sentence]
+pos_prob = predict_proba(unique)[:, POS]
+for idx in np.argsort(pos_prob)[:3]:
+    print(unique[idx], "->", pos_prob[idx], "removed:", find_removed_words(sentence, unique[idx]))
+ 
+# ---------- remove-one-word vs LIME (given) ----------
+for w, p, drop in remove_one_word(sentence):
+    print(f"{w:12s} P(pos)={p:.3f} drop={drop:+.3f}")
+ 
+# ---------- 100 samples vs 1000 samples (given) ----------
+exp100 = explainer.explain_instance(sentence, predict_proba,
+                                    num_features=len(sentence.split()), num_samples=100)
+print(exp100.as_list())
+
+========================================================================================
+Experiment 10 — LRP and Gradient × Input
+========================================================================================
+import numpy as np
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.neural_network import MLPClassifier
+ 
+# ---------- data (given; shortened here - use the full lab list) ----------
+train = [("i love this movie", 1), ("great acting and a wonderful story", 1),
+         ("a brilliant and moving film", 1), ("i loved the ending", 1),
+         ("i hate this movie", 0), ("terrible acting and a boring story", 0),
+         ("a dull and awful film", 0), ("i hated the ending", 0)]
+texts, labels = zip(*train)
+ 
+vec = CountVectorizer(binary=True, token_pattern=r"(?u)\b\w+\b")   # keep one-letter words like "i"
+Xtr = vec.fit_transform(texts).toarray().astype(float)
+ 
+clf = MLPClassifier(hidden_layer_sizes=(8,), activation="relu", max_iter=2000, random_state=0)
+clf.fit(Xtr, labels)
+W1, W2 = clf.coefs_            # W1: (vocab, 8)   W2: (8, 1)
+b1, b2 = clf.intercepts_       # b1: (8,)         b2: (1,)
+ 
+# ---------- helpers  (YOU WRITE THESE) ----------
+def forward(x, W1, b1, W2, b2):
+    z1 = x @ W1 + b1                    # hidden pre-activation
+    a1 = np.maximum(0, z1)              # ReLU
+    logit = float(a1 @ W2[:, 0] + b2[0])    # output score (before sigmoid)
+    return a1, logit
+ 
+def lrp(x, W1, b1, W2, b2, eps=0.0):
+    a1, logit = forward(x, W1, b1, W2, b2)
+    R_output = logit                                   # start: relevance = the output score
+ 
+    # output -> hidden : share the score according to each unit's contribution a1[k]*W2[k]
+    z_hidden = a1 * W2[:, 0]
+    R_hidden = z_hidden / (z_hidden.sum() + eps) * R_output
+ 
+    # hidden -> input : each hidden unit shares ITS relevance among the words
+    R_words = np.zeros_like(x)
+    for k in range(W1.shape[1]):
+        if a1[k] <= 0:                                 # dead ReLU unit: nothing to pass down
+            continue
+        z_words = x * W1[:, k]                         # contribution of every word to unit k
+        R_words += z_words / (z_words.sum() + eps) * R_hidden[k]
+    return R_words, R_hidden, logit
+ 
+def grad_x_input(x, W1, b1, W2, b2):
+    z1 = x @ W1 + b1
+    mask = (z1 > 0).astype(float)                      # 1 where ReLU is active, else 0
+    gradient = W1 @ (mask * W2[:, 0])                  # d(logit)/dx  by the chain rule
+    return x * gradient                                # gradient x input
+ 
+# ---------- experiments (given) ----------
+sentence = "i love this movie"
+x = vec.transform([sentence]).toarray().astype(float)[0]
+ 
+R_words, R_hidden, logit = lrp(x, W1, b1, W2, b2, eps=0.0)
+print("logit:", logit, "| sum of word relevance:", R_words.sum())     # conservation
+ 
+W1z, W2z = W1.copy(), W2.copy()
+b1z, b2z = np.zeros_like(b1), np.zeros_like(b2)                     # bias-free model
+lrp0 = lrp(x, W1z, b1z, W2z, b2z)[0]
+gxi = grad_x_input(x, W1z, b1z, W2z, b2z)
+for w in sentence.split():
+    i = vec.vocabulary_[w]
+    print(f"{w:8s} LRP-0 = {lrp0[i]:.4f}   Grad x Input = {gxi[i]:.4f}")  # identical!
+ 
+for eps in [0, 0.1, 0.5, 1, 2]:
+    print("eps", eps, "-> total relevance", round(lrp(x, W1, b1, W2, b2, eps)[0].sum(), 4))
+
+
+########################################################################################
+PART II — TOPIC-WISE VIVA GUIDE
+########################################################################################
+
+HOW TO APPROACH A BLANK HELPER IN THE EXAM
+1. Read where the helper is called: identify its inputs and the shape/type expected by the next line.
+2. Convert the explanation into 3–6 plain steps.
+3. Run it and check the relevant sanity test.
+4. Use the professor's variable names; preserve the logic and rename only when necessary.
+
+UNIVERSAL EXAM TRAPS
+• Always copy data before changing a column (X.copy()) so later steps are not corrupted.
+• Accuracy/R²: higher is better, so importance = baseline − new score.
+• Error metrics such as RMSE/MSE: lower is better, so importance = new error − baseline error.
+• Tabular experiments 1–4 are model-agnostic: the helper generally interacts through model.predict(...).
+• For deep-learning gradient explanations, use model.eval() and the target-class logit; use softmax when reporting confidence.
+• When explaining an output, state what the values/colours mean, identify the top feature/word/region, and mention one limitation.
+
+----------------------------------------------------------------------------------------
+Experiment 1 — Permutation Feature Importance (PFI)
+----------------------------------------------------------------------------------------
+The idea in one breath: Shuffle one feature's column so it becomes noise; if the model's accuracy collapses, the model was relying on that feature.
+Helper function(s) explained
+manual_pfi(model, X, y, n_repeats=1)
+What it does: Returns one importance number per feature (a list in the same order as X.columns).
+1.  baseline = accuracy on the untouched data. This is the number to beat.
+2.  Loop over each feature (column) one at a time.
+3.  Make a copy of X so the original is never damaged.
+4.  Overwrite just that one column with np.random.permutation(...) - the same values, in random order. Every row now has a wrong value for this feature, but the column still has the same distribution.
+5.  Predict again on the damaged data and compute the new accuracy.
+6.  Importance = baseline - new accuracy. Big drop = the model needed that feature. Zero = the model ignores it.
+Intuition: Imagine a chef whose recipe uses salt, sugar and chilli. Swap the salt with a random ingredient from another dish - if the dish is ruined, salt mattered. Swapping (shuffling) instead of deleting keeps the data realistic, and it breaks only the link between the feature and the answer.
+
+If the professor changes something, change THIS
+•  Regression model / R2 / RMSE? Replace accuracy_score by r2_score (higher better: still baseline - score) or by RMSE (lower better: use score - baseline).
+•  Different metric (F1, precision): swap the metric function; nothing else changes.
+•  Averaging: set n_repeats=10 to mimic the library. One shuffle is noisy - this is exactly why manual and library values differ slightly.
+•  Which data? Use the test set (shows what the model needs to generalise). Using the train set is also acceptable if asked.
+•  Sanity check: the order of top features should roughly match permutation_importance(...).importances_mean.
+
+Lines you can write in your conclusion / viva
+•  Glucose has the highest importance, then BMI and Age - shuffling them hurts accuracy most.
+•  Features with importance exactly 0 (e.g. Insulin, SkinThickness in the pruned tree) are never used for splitting by the tree (max_depth=5).
+•  Slightly negative importance means shuffling made no real difference / helped by chance - it is noise, typical on a small test set.
+•  Manual (1 shuffle) vs library (average of 10 shuffles): same ranking, small numeric differences because of random variation.
+•  Limitation: if two features are correlated, shuffling one can look unimportant because the other still carries the information.
+
+----------------------------------------------------------------------------------------
+Experiment 2 — SHAP (Shapley Additive Explanations)
+----------------------------------------------------------------------------------------
+The idea in one breath: Treat features as team players: SHAP shares the difference between this prediction and the average prediction fairly among them, so that base value + all SHAP values = the model output.
+Helper function(s) explained
+get_class_shap(raw_shap, class_id=1)
+What it does: Gives you a clean 2-D array (rows = samples, columns = features) of SHAP values for ONE class, whatever SHAP version you have.
+1.  For a classifier, SHAP computes values for each class. Old versions return a list [class0, class1] -> take raw_shap[class_id].
+2.  New versions return one 3-D array (samples, features, classes) -> take raw_shap[:, :, class_id].
+3.  If it is already 2-D (regressors, some binary cases) return it as it is.
+Intuition: The plots all expect samples x features. This helper is just a 'shape adapter' so the rest of the code works. If you forget class_id: class 1 = benign here, class 0 = malignant; the class-0 SHAP values are simply the negative of class-1 for binary problems.
+shap_importance(shap_vals, feature_names)
+What it does: Global importance table: which features matter most on average.
+1.  Take the absolute value np.abs(...) - a feature that pushes up by 0.3 and one that pushes down by 0.3 are both equally important.
+2.  Average over samples: .mean(axis=0) (axis 0 = across rows, leaving one number per feature).
+3.  Put into a DataFrame and sort descending. Its bar chart equals shap.summary_plot(..., plot_type='bar').
+Intuition: Mean |SHAP| answers: 'how much does this feature typically move the prediction?'
+
+If the professor changes something, change THIS
+•  Regression model: shap_values is already 2-D and expected_value is a single number - use base_value = np.ravel(explainer.expected_value)[0] and skip class_id.
+•  Other class: class_id=0 and base value index [0].
+•  Different sample: change sample = 10.
+•  Different model: TreeExplainer is for tree models (RF, XGBoost, tree). For anything else the professor will use shap.KernelExplainer(model.predict_proba, X_train_sample) - the helpers do not change.
+•  Reading the plots: Beeswarm: x = SHAP value (right pushes toward the class), colour = feature value (red high, blue low). Bar: mean |SHAP|. Waterfall: starts at base value E[f(X)], each bar adds/subtracts, ends at f(x). Force: same as waterfall in one line (red pushes up, blue down).
+
+Lines you can write in your conclusion / viva
+•  worst area, worst concave points, mean concave points, worst radius are the top features.
+•  High worst area (red) gives negative SHAP for class 1 - it pushes toward malignant. Larger, more irregular cells = malignant, which matches medical intuition.
+•  Additivity (efficiency) check: base value + sum of SHAP values of a sample = the model's probability for that sample (the last two prints match).
+•  SHAP gives both global (summary/bar) and local (waterfall/force) explanations; LIME is local only.
+
+----------------------------------------------------------------------------------------
+Experiment 3 — Partial Dependence Plot (PDP) and Sensitivity
+----------------------------------------------------------------------------------------
+The idea in one breath: PDP: force every house to have the same value of one feature and average the predicted price; repeat over a range of values. Sensitivity: nudge a feature by a fixed amount and measure how the average price moves.
+Helper function(s) explained
+partial_dependence_manual(model, X, feature, n_points=50)
+What it does: Returns the x-values (grid) and the average prediction at each x-value (pd_values) - ready for plt.plot(grid, pdp).
+1.  np.linspace(min, max, n_points) builds the grid: 50 evenly spaced values across the feature's range.
+2.  For each grid value: copy X (never edit the original).
+3.  Set the whole column to that value: X_temp[feature] = value (every house now 'has' that income).
+4.  Predict for all rows and average - this one number is the PDP height at that value.
+5.  Collect the 50 averages -> that is the curve.
+Intuition: 'What would the model predict on average if everybody had income = v?' Averaging washes out all the other features - so the curve isolates the effect of this one feature.
+sensitivity(model, X, feature, delta)
+What it does: How much the average prediction changes when a feature is increased by delta (the lab prints change and change/delta).
+1.  original = mean prediction on the real data.
+2.  Copy X and add delta to the column.
+3.  new = mean prediction on the changed data.
+4.  change = new - original; sensitivity = change / delta (price change per one unit of the feature).
+Intuition: A 'what if' test: 'if every house were 1 year older, how much does the average price move?' Dividing by delta converts it to a rate so different step sizes can be compared.
+
+If the professor changes something, change THIS
+•  Different delta: change the numbers in the changes dictionary. To use a percentage: X_new[feature] = X_new[feature] * 1.10 and divide the change by 10 (percent).
+•  Compare features fairly: income (in dollars) and rooms (count) have different units, so raw sensitivity values (20.77 vs 89,454) are not comparable unless you use the same relative change (e.g. +10 %).
+•  Classifier instead of regressor: use model.predict_proba(X_temp)[:, 1].mean() in place of model.predict(...).mean().
+•  Data for PDP: the lab fits the grid from X_train range but averages over the data you pass in - either is fine; say which one you used.
+•  Sanity check: the PDP of a feature the model ignores is flat; a useful feature slopes.
+
+Lines you can write in your conclusion / viva
+•  PDP shows the marginal effect of a feature on predicted price after averaging out the others: income and number of rooms increase price; the random forest curves look step-like because trees predict piecewise constants.
+•  Sensitivity quantifies the same thing as a rate: House Age and Number of Rooms (+1 unit) shift the price strongly; per-dollar sensitivity of income/population is small because one dollar is a tiny step.
+•  Limitation of PDP: it assumes the feature is independent of the others and may evaluate unrealistic combinations (this is what ALE fixes).
+
+----------------------------------------------------------------------------------------
+Experiment 4 — ICE and ALE plots
+----------------------------------------------------------------------------------------
+The idea in one breath: ICE draws one curve per house (a PDP before averaging). ALE measures the change in prediction over small bins of the feature using only real houses that fall in each bin, adds the changes up, and centres them.
+Helper function(s) explained
+ice_curves(model, X, feature, grid)
+What it does: Returns an array with one row per sample and one column per grid value - each row is one house's 'what-if curve'.
+1.  For every grid value copy X and set the feature to it for all rows.
+2.  Predict - this gives one prediction per house (not averaged!).
+3.  Stack the predictions and transpose (.T) so that rows = houses, columns = grid points. Plot each row as a thin line.
+Intuition: PDP is just ice.mean(axis=0) (the thick dashed line in the code). If all ICE lines are parallel, the feature acts the same for everyone; if they cross/fan out, the feature interacts with others.
+ale_1d(model, X, feature, n_bins=10)
+What it does: Returns the bin centres and the centred ALE value for each.
+1.  Cut the feature's range into n_bins equal bins (np.linspace(..., n_bins + 1) gives the edges).
+2.  For each bin keep only the rows whose feature value lies in the bin (mask). The last bin includes the right edge <=, others use <. Skip empty bins.
+3.  Make two copies of these rows: feature set to the bin's lower edge and to the upper edge.
+4.  Local effect = prediction(upper) - prediction(lower), for each row; take the mean.
+5.  np.cumsum accumulates the local effects bin after bin - that is the 'A' (accumulated) in ALE.
+6.  Subtract the mean so the curve is centred around zero (ALE = deviation from the average prediction).
+Intuition: Only a small step is taken, and only on houses that are really in that region of income, so no unrealistic combinations (like a tiny house with 10 bedrooms) are ever fed to the model. That is the advantage over PDP/ICE when features are correlated.
+
+If the professor changes something, change THIS
+•  Different feature / bins: change feature and n_bins. More bins = more detail but noisier.
+•  Centred ICE: subtract the first column: ice - ice[:, [0]] to compare shapes starting at zero.
+•  Classification: use model.predict_proba(X_temp)[:, 1] instead of model.predict(X_temp).
+•  Number of ICE samples: X_test.iloc[:100] just keeps the plot readable.
+•  Sanity check: ice.mean(axis=0) should look like the PDP from Topic 3; the ALE should have mean ~0.
+
+Lines you can write in your conclusion / viva
+•  ICE: every house's predicted price increases with Avg. Area Income - the effect is consistent (lines are roughly parallel) with some spread showing interactions.
+•  ALE is centred at zero: values show how much the income pushes the prediction above/below the average, and it is reliable even when features are correlated.
+•  PDP = average of ICE curves; ALE = accumulated local differences (unbiased with correlated features).
+
+----------------------------------------------------------------------------------------
+Experiment 5 — Integrated Gradients (IG)
+----------------------------------------------------------------------------------------
+The idea in one breath: Walk from a blank 'baseline' image to the real image in small steps, add up the gradient of the class score along the walk, then multiply by how far each pixel travelled. The sum of all pixel scores equals F(image) - F(baseline).
+Helper function(s) explained
+get_baseline(kind, raw_img, x)
+What it does: Returns the 'blank' reference image, the same shape as x ([1,3,224,224]).
+1.  x is normalised (mean/std). A black image has pixel value 0, so in normalised units it is (0 - mean) / std; white is (1 - mean) / std.
+2.  torch.zeros_like(x) makes a tensor with x's shape, so broadcasting with mean/std (shape [1,3,1,1]) works.
+3.  Blurred baseline: blur the raw PIL image first, then run the same preprocess.
+Intuition: The baseline is the 'absence of information'. Attribution always means 'compared with this baseline'. Black highlights bright features, white highlights dark ones, blurred highlights edges and texture.
+integrated_gradients(model, x, baseline, target, steps=50)
+What it does: Manual IG. Returns a tensor shaped like x with one attribution per pixel-channel.
+1.  For k = 1...steps compute the point on the straight line: baseline + (k/steps) * (x - baseline).
+2.  Make it a leaf that needs gradients (.clone().requires_grad_(True)).
+3.  score = model(point)[0, target] - use the logit of the target class.
+4.  torch.autograd.grad(score, point)[0] gives d score / d pixels. Add to total_grad.
+5.  Average: total_grad / steps (Riemann sum for the integral).
+6.  Multiply by (x - baseline): pixels that changed a lot along the path get more credit.
+Intuition: Plain gradient only looks at the final image where the neuron may be saturated (gradient ~ 0 although the pixel mattered). IG averages the gradient over the whole path, so it still 'sees' the importance. Completeness: attr.sum() ~ F(x) - F(baseline) - the Captum 'delta' is the error of this equality.
+hide_top_pixels(x, attr, k_percent)
+What it does: The deletion test: black out the k % most important pixels.
+1.  Pixel importance = absolute attribution summed over the 3 colour channels: attr.abs().sum(dim=1) -> shape [1,H,W].
+2.  Threshold = the (100-k)th percentile (torch.quantile(..., 1 - k/100)).
+3.  Mask = 1 where importance >= threshold; unsqueeze(1) to make it [1,1,H,W] so it broadcasts over channels.
+4.  x * (1 - mask) zeros those pixels. Run the model again - confidence should drop a lot if IG was right.
+Intuition: 'If I hide exactly what you said was important, does the model get confused?' A large drop proves the heatmap is faithful.
+
+If the professor changes something, change THIS
+•  Captum version: IntegratedGradients(model).attribute(x, baselines=baseline, target=target, n_steps=50, return_convergence_delta=True). If the prof gives you this, your helpers are only get_baseline and hide_top_pixels.
+•  Steps: more steps = smaller delta (better approximation). 50-300 are typical.
+•  Another class: target = probs.topk(5).indices[0][1].item() (second most likely class).
+•  Other model (ResNet-50 etc.): nothing changes - IG only needs gradients.
+•  Deletion of lowest k % instead: use quantile(importance, k/100) and importance <= threshold.
+•  Gotchas: model.eval(); never use softmax inside IG - use the logit; the baseline and x must be on the same device.
+
+Lines you can write in your conclusion / viva
+•  Warm (red) regions support the predicted class; cool (blue) regions argue against it.
+•  Completeness: the pixel attributions sum to F(x) - F(baseline); a convergence delta close to 0 shows 50 steps were enough.
+•  Hiding the top 15 % of pixels causes a large drop in confidence -> the attributed pixels are truly responsible (faithfulness).
+•  Baseline matters: black emphasises bright regions, white emphasises dark regions/shadows, blurred emphasises sharp edges.
+
+----------------------------------------------------------------------------------------
+Experiment 6 — XRAI and the gray-patch (occlusion) test
+----------------------------------------------------------------------------------------
+The idea in one breath: XRAI = Integrated-Gradients-style pixel attribution + image segmentation, so the final explanation is a ranking of whole regions. The gray-patch test is a direct check: cover a region with gray and see how much confidence drops.
+Helper function(s) explained
+call_model_function(images, call_model_args, expected_keys)
+What it does: The 'contract' the saliency library needs: given a batch of images, return the gradient of the target-class score w.r.t. those images.
+1.  Convert images to a TensorFlow tensor.
+2.  Inside tf.GradientTape() call tape.watch(images) (tell TF to track the pixels), run the model, and pick the target-class column [:, target].
+3.  tape.gradient(output, images) = d score / d pixels. Convert to numpy.
+4.  Return it in a dict with the key saliency.INPUT_OUTPUT_GRADIENTS - XRAI looks for exactly this key.
+Intuition: XRAI itself does not know your model; this function is the only place it asks the model anything. It calls it many times along the IG path and then groups the pixel scores into regions.
+create_patched_image(image, x, y, size)
+What it does: Returns a copy of the image with a gray square (value 128) centred at (x, y).
+1.  half = size // 2; box = x +- half, y +- half.
+2.  Clip the box with max(0, ...) and min(299, ...) so it never leaves the 299x299 image.
+3.  Assign patched[y1:y2, x1:x2] = 128 (NumPy indexes rows first = y, then columns = x).
+Intuition: A gray patch removes information in that area without a big colour change.
+find_worst_patch(image, sizes, step)
+What it does: Automatically finds which patch (position and size) causes the largest drop in the target-class confidence.
+1.  Loop over sizes and a grid of centres; build every patched image and pass it through preprocess_input (the model's required preprocessing).
+2.  Predict all patches in one batch (model.predict(np.array(batch))) - much faster than one-by-one - and keep the target-class column.
+3.  drops = original_conf - preds; np.argmax(drops) picks the most damaging patch.
+Intuition: A brute-force 'search for the weak spot'. If the worst patch sits where XRAI is red, XRAI and the occlusion test agree.
+
+If the professor changes something, change THIS
+•  Patch colour: 0 (black) or the image mean instead of 128.
+•  Search density: change step and sizes; smaller step = finer search but slower.
+•  Top-k % region: np.percentile(mask, 80) = top 20 %. Use 90 for top 10 %.
+•  Task 1 (predict before XRAI): write down your guess (e.g. cat's face/eyes = important, sofa = ignored) before running; then compare.
+•  Model/preprocessing: preprocess_input is model specific (InceptionV3 scales to [-1,1]) - always use the one that matches the model.
+
+Lines you can write in your conclusion / viva
+•  XRAI highlights contiguous regions (face, ears) instead of scattered pixels - easier for humans to read than raw IG.
+•  The gray patch placed over the most important region drops the confidence strongly, while patches over background change it very little -> XRAI is faithful.
+•  Check: our prediction (face important, background ignored) agreed / disagreed with the model - say which.
+
+----------------------------------------------------------------------------------------
+Experiment 7 — Grad-CAM from scratch
+----------------------------------------------------------------------------------------
+The idea in one breath: The last conv layer holds many feature maps (pattern detectors). Weight each map by how much the class score cares about it (its average gradient), add them up, keep the positive part, and you get a heatmap of 'where the evidence is'.
+Helper function(s) explained
+compute_gradcam(activations, gradients)
+What it does: Turns the saved activations [1, K, h, w] and gradients [1, K, h, w] into a 2-D heatmap in [0, 1].
+1.  alpha = gradients.mean(dim=(2,3), keepdim=True) -> shape [1,K,1,1]: one weight per feature map (global average pooling of the gradients).
+2.  Weighted sum: (alpha * activations).sum(dim=1, keepdim=True) -> shape [1,1,h,w]: add all K maps, each multiplied by its importance.
+3.  ReLU: keep only positive values - areas that support the class; negative values are evidence for other classes.
+4.  Squeeze to 2-D, move to numpy (.detach().cpu().numpy()).
+5.  Normalise to 0..1: subtract the min, divide by the max (guard against dividing by 0).
+6.  (Given code afterwards: cv2.resize to the image size, colour map, overlay.)
+Intuition: Think of layer4 as 2048 little detectors (an 'ear detector', a 'fur-texture detector' ...). The gradient says 'turning this detector up would raise the cat score by this much' - averaged over the map that is the detector's weight. Add the detector maps in proportion to their weights -> the heatmap lights up where the important detectors fired.
+
+If the professor changes something, change THIS
+•  How the hooks work (given code): the forward hook stores the layer output A^k during the forward pass; the backward hook stores d score / dA^k during .backward(). You must call output[0, class].backward() on the logit (not softmax).
+•  Different layer: model.layer3, model.layer4[-1]. Earlier layer = sharper but less semantic heatmap. For VGG use model.features[-1].
+•  Different class: replace pred by any index, e.g. output[0, 281].backward().
+•  Different model (ResNet-18): same code, layer4 has 512 channels.
+•  If register_full_backward_hook throws an in-place error: inside forward_hook use out.register_hook(lambda g: save_grad(g)) (save the gradient there) - result is identical.
+•  Always run model.zero_grad() and reset the stored values per image.
+
+Lines you can write in your conclusion / viva
+•  The heatmap's hot (red) region sits on the object that defines the predicted class - the model looks at the object, not the background.
+•  Using the last conv layer keeps high-level meaning with a coarse spatial grid (7x7 for 224x224 input), so Grad-CAM heatmaps look blurry.
+•  ReLU keeps only features with a positive influence on the target class.
+•  Advantage over CAM: works on any CNN without the global-average-pooling architecture requirement.
+
+----------------------------------------------------------------------------------------
+Experiment 8 — LIME for images
+----------------------------------------------------------------------------------------
+The idea in one breath: Cut the image into superpixels, randomly switch many of them off, ask the model for its probability each time, and fit a simple weighted linear model: each superpixel's weight = its importance for the class.
+Helper function(s) explained
+classifier_fn(batch)
+What it does: The adapter LIME talks to: takes a batch of numpy images, returns class probabilities shape (n, 1000).
+1.  LIME hands you images as float/uint8 numpy arrays -> clip to 0-255 and convert to uint8.
+2.  Convert each to PIL and apply the same preprocess as normal inference.
+3.  torch.stack into one batch tensor, run the model, softmax, back to numpy.
+Intuition: LIME is model-agnostic: it only needs a function 'images in -> probabilities out'. Anything that does that will work (the decorator @torch.no_grad() just saves memory).
+slic_segments / quickshift_segments / make_explanation
+What it does: Segmentation functions return an integer label per pixel (the superpixel id). make_explanation runs LIME.
+1.  SLIC: k-means in colour+position -> regular, similarly sized blocks (n_segments, compactness).
+2.  Quickshift: density mode seeking -> irregular, varying size shapes that hug object boundaries (can create very many tiny segments).
+3.  explain_instance(image, classifier_fn, top_labels=3, hide_color=0, num_samples=800, segmentation_fn=...): hide_color=0 = hidden superpixels become black; num_samples = number of perturbed images; top_labels=3 explains the 3 top classes.
+Intuition: The segmentation decides the 'vocabulary' of the explanation - change it and you get a different (disagreeing) explanation for the same image.
+get_positive_weights(explanation, class_id)
+What it does: List of (segment id, weight) with positive weight, strongest first.
+1.  explanation.local_exp[class_id] holds (segment, weight) pairs from the linear model.
+2.  Keep weight > 0 (supports the class) and sort by weight, descending.
+deletion_test(im, explanation, class_id, base_prob, k_list)
+What it does: Checks faithfulness: does deleting LIME's top-k regions hurt more than deleting k random regions?
+1.  For each k: take the first k ids from get_positive_weights.
+2.  Blacken exactly those pixels: deleted[np.isin(segments, top_ids)] = 0.
+3.  lime_drop = base_prob - probability after deletion.
+4.  Repeat n_random times with k random segment ids and average those drops (baseline).
+5.  Return (k, lime_drop, mean_random_drop). Faithful explanation: LIME drop >> random drop.
+Intuition: A 'prove it' test using only model predictions: if your highlighted regions really matter, removing them must hurt more than removing arbitrary regions.
+
+If the professor changes something, change THIS
+•  More/less detail: n_segments=60 -> 30 or 100. Samples: num_samples 300 -> 1000: more samples = more stable weights but slower.
+•  Hide colour: hide_color=0 (black) or None (mean colour).
+•  Positive and negative evidence: get_image_and_mask(label, positive_only=False, num_features=10, hide_rest=False).
+•  Show only the explanation region: hide_rest=True.
+•  Other model: just change classifier_fn (preprocessing must match that model).
+•  Deciding between two explanations: define the criterion first (e.g. larger probability drop than random), then compare scores; if the difference is below a margin, say 'inconclusive'.
+
+Lines you can write in your conclusion / viva
+•  LIME highlights the superpixels (e.g. cat's face) that most increase the class probability; negative regions reduce it.
+•  SLIC gives regular blocks, Quickshift irregular object-hugging segments - the explanation depends on the segmentation, so no single explanation is 'the truth'.
+•  Deletion test: removing LIME's top regions drops the probability far more than removing random regions -> LIME is faithful to the model.
+•  Limitations: black masking creates unnatural images; random sampling makes results vary between runs.
+
+----------------------------------------------------------------------------------------
+Experiment 9 — LIME for text
+----------------------------------------------------------------------------------------
+The idea in one breath: Randomly delete words from the sentence, ask the sentiment model what it thinks of each shortened sentence, then fit a weighted linear model; a word's coefficient = how much it pushes toward POSITIVE.
+Helper function(s) explained
+predict_proba(sentences)
+What it does: The function you hand to LIME: list of strings in -> NumPy array (n_sentences, 2) of [P(negative), P(positive)] out.
+1.  LIME may pass a single string - wrap it into a list.
+2.  tokenizer(sentences, padding=True, truncation=True, return_tensors='pt') converts text to token ids (padding makes the batch rectangular).
+3.  Run the model without gradients and take .logits.
+4.  torch.softmax(logits, dim=1) -> probabilities that sum to 1 per sentence; .numpy().
+Intuition: Column order = model.config.id2label (here 0 = NEGATIVE, 1 = POSITIVE). LIME's score for 'positive' therefore refers to column 1. Always print id2label first.
+get_words + remove_one_word(sentence)
+What it does: A simple, deterministic cousin of LIME: delete each word once and measure how the positive probability drops.
+1.  get_words splits into words without punctuation (so 'wonderful.' -> 'wonderful').
+2.  original = P(positive) of the full sentence.
+3.  For each position i build the sentence words[:i] + words[i+1:].
+4.  Drop = original - new P(positive). Positive drop = the word was supporting POSITIVE; negative drop (probability rises) = the word was pushing NEGATIVE.
+5.  Sort by drop (largest first) to compare with the LIME ranking.
+Intuition: Remove-one-word changes ONE word at a time, so it misses combinations (e.g. 'not' + 'exciting'). LIME removes many words at once and fits all words together - that is why the two rankings usually differ somewhat.
+find_removed_words(original, changed)
+What it does: Tells you which words LIME removed from one perturbed sentence (needed to answer 'do the lowest copies miss LIME's top words?').
+1.  Walk through the original words with a pointer j into the changed sentence's words.
+2.  If the current original word equals the changed word at j -> it survived; move j forward.
+3.  Otherwise the word was deleted -> add to removed.
+Intuition: Two-pointer matching works because LIME only deletes words and never reorders them.
+
+If the professor changes something, change THIS
+•  Which class does LIME explain? as_list() uses label 1 (POSITIVE) by default: positive scores push toward POSITIVE, negative toward NEGATIVE. For the other class: explain_instance(..., labels=(0,)) and exp.as_list(label=0).
+•  Samples: num_samples=1000 vs 100: scores change because the random perturbations differ - fewer samples = noisier, less stable explanation. Compare with mean absolute difference.
+•  Different model: only predict_proba changes. For a sklearn pipeline: lambda texts: pipeline.predict_proba(texts).
+•  Own sentence: use one with a negation ('not exciting') or repeated word - LIME gives one score per unique word.
+•  Printing 8 random / 3 lowest / 3 highest copies: sort P(positive) of the unique generated sentences with np.argsort.
+
+Lines you can write in your conclusion / viva
+•  Largest positive word: 'wonderful' (about +0.77); largest negative: 'weak' - exactly the words a human would pick.
+•  In your own sentence 'not' gets a negative score and 'brilliant' a positive one: the model understands negation.
+•  The lowest-probability copies are the ones where 'wonderful' was removed -> they overlap with LIME's top words.
+•  Remove-one-word and LIME rankings agree on the extremes but not exactly in the middle (interactions).
+•  100 samples instead of 1000 changes the scores (mean abs difference > 0) - use enough samples for stable explanations.
+
+----------------------------------------------------------------------------------------
+Experiment 10 — LRP and Gradient × Input
+----------------------------------------------------------------------------------------
+The idea in one breath: Treat the model's output score as money and hand it back layer by layer to the neurons that produced it, in proportion to their contribution (LRP). Gradient x Input instead multiplies each input by the derivative of the output with respect to it.
+Helper function(s) explained
+forward(x, W1, b1, W2, b2)
+What it does: One forward pass of the 2-layer network. Returns the hidden activations and the output score (logit).
+1.  z1 = x @ W1 + b1 (words -> hidden pre-activation).
+2.  a1 = np.maximum(0, z1) is the ReLU.
+3.  logit = a1 @ W2 + b2 (hidden -> output). This number is what we want to explain.
+Intuition: x is a 0/1 vector over the vocabulary: 1 for every word present in the sentence.
+lrp(x, W1, b1, W2, b2, eps=0.0)
+What it does: Returns relevance per word (R_words), per hidden neuron (R_hidden) and the logit.
+1.  Start: relevance at the output = the logit.
+2.  Output -> hidden: contribution of hidden unit k is z_k = a1[k] * W2[k]. Its share = z_k / (sum of all z + eps); multiply by the output relevance -> R_hidden.
+3.  Hidden -> input: for each active hidden unit k, the contribution of word j is z_jk = x[j] * W1[j,k]. Share = z_jk / (sum_j z_jk + eps); multiply by R_hidden[k] and add into R_words (a word receives relevance from every hidden unit).
+4.  Skip hidden units with a1[k] <= 0 (dead ReLU: they carried nothing).
+5.  Biases are left out of the denominators (the rule used in the lab).
+Intuition: Conservation: because every share sums to 1, nothing is created or lost: sum(R_words) = sum(R_hidden) = logit (when eps = 0). A positive word score means 'this word supported the output', negative 'it worked against'.
+grad_x_input(x, W1, b1, W2, b2)
+What it does: Attribution = input x d(logit)/d(input).
+1.  mask = (z1 > 0): 1 where the ReLU is on, 0 where it is off (derivative of ReLU).
+2.  Chain rule: gradient = W1 @ (mask * W2) -> one derivative per word (shape = vocabulary size).
+3.  attribution = x * gradient - words not in the sentence (x = 0) get 0.
+Intuition: 'How steeply would the output change if I turned this word up, and is the word actually there?'
+Last-minute revision: method vs question
+
+If the professor changes something, change THIS
+•  Epsilon rule (LRP-eps): eps > 0 is added to the denominators; it absorbs a little relevance, so the total drops below the logit (2.85 -> 0.71 for eps = 2 in the lab) but the explanation is more stable. The textbook version adds eps * sign(denominator); the lab adds plain eps.
+•  Bias-free test: set b1 and b2 to zeros -> LRP-0 and Gradient x Input become identical (that is the key result of the experiment).
+•  With biases: they differ, because LRP ignores biases in its denominators, whereas bias changes which ReLUs are on and so changes the gradient.
+•  Other sentence: change sentence; words not in the vocabulary get 0 (vec.vocabulary_.get(word) is None).
+•  Deeper network: repeat the 'hidden -> input' block for each layer, from the top one downwards.
+•  Conservation check: R_words.sum() vs logit; also R_hidden.sum().
+
+Lines you can write in your conclusion / viva
+•  LRP-0 conserves relevance: sum over words = hidden relevance = output logit (2.854 = 2.854).
+•  For a bias-free network LRP-0 equals Gradient x Input exactly (love 1.349 in both).
+•  With biases the two differ - e.g. 'love' gets 2.36 with Gradient x Input but 0.67 with LRP-0 - so the equivalence needs zero biases.
+•  Increasing epsilon makes the total relevance shrink (epsilon absorbs relevance) but suppresses noisy contributions.
+
+----------------------------------------------------------------------------------------
+LAST-MINUTE REVISION — METHOD VS QUESTION
+----------------------------------------------------------------------------------------
+Method | Question it answers | Global / Local
+Permutation importance | Which features does the model rely on (accuracy drop when shuffled)? | Global
+SHAP | How much did each feature push this prediction away from the average? | Both
+PDP | Average prediction as one feature changes? | Global
+Sensitivity | How much does the average output move for a fixed nudge? | Global
+ICE | Same as PDP for each individual sample (shows heterogeneity). | Local (per instance)
+ALE | Effect of a feature using only realistic data, centred at 0. | Global
+Integrated Gradients | Which pixels (vs a baseline) explain the class score? Satisfies completeness. | Local
+XRAI | Which regions of the image matter (IG + segments)? | Local
+Grad-CAM | Where (coarse region) in the image does the CNN look? | Local
+LIME | Which superpixels/words explain this prediction (local linear surrogate)? | Local
+LRP / Grad x Input | How is the output score distributed back to inputs? | Local
+
+5 things to double-check in any helper you write
+•  Did I copy before modifying? (X.copy(), image.copy(), torch.clone())
+•  Does the return value have the shape/type the next given line expects? (list vs array vs tuple; (n, classes) vs (n,))
+•  Am I using the right output: probabilities for LIME, logits for gradients, predict (not predict_proba) for regression?
+•  Is the direction right: baseline - score (accuracy) vs score - baseline (error)?
+•  Did I run a sanity check: PFI ranking ~ library, SHAP additivity, IG completeness, LRP conservation, ICE mean = PDP?
+
+SOURCE NOTE
+This guide is reorganized from the uploaded XAI_Lab_Exam_Prep.docx. The code blocks are copied from its code tables. Viva explanations, adjustment notes, conclusions, comparison table, and final checklist are based on the same source document.
